@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "cobblesyncbridge",
+  "version": "${version}",
+  "name": "CobbleSyncBridge",
+  "description": "Server-side Fabric bridge that syncs Cobblemon server/player/party/pokedex data to the tracking backend.",
+  "authors": ["OpenAI"],
+  "contact": {
+    "sources": "local-source-zip"
+  },
+  "license": "All Rights Reserved",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "com.cobbleverse.cobblesyncbridge.CobbleSyncBridgeMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.17.2",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*",
+    "cobblemon": "*"
+  }
+}
