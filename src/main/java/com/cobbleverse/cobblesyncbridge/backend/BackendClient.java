@@ -20,8 +20,8 @@ import java.util.concurrent.Executors;
 public final class BackendClient {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
-    private static final Duration BACKOFF_DURATION = Duration.ofSeconds(120);
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration BACKOFF_DURATION = Duration.ofSeconds(30);
     private static final int MAX_QUEUED_REQUESTS = 4;
 
     private final BridgeConfig config;
