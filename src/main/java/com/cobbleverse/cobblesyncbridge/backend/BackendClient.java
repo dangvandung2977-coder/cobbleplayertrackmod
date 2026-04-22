@@ -20,20 +20,20 @@ import java.util.concurrent.Executors;
 public final class BackendClient {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(5);
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
-    private static final Duration BACKOFF_DURATION = Duration.ofSeconds(30);
-    private static final int MAX_QUEUED_REQUESTS = 4;
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration BACKOFF_DURATION = Duration.ofSeconds(60);
+    private static final int FAILURES_BEFORE_BACKOFF = 2;
 
     private final BridgeConfig config;
     private final HttpClient httpClient;
     private final ExecutorService executor;
     private volatile String knownServerId;
-    private int queuedRequests;
+    private int consecutiveFailures;
     private long backoffUntilMillis;
 
     public BackendClient(BridgeConfig config) {
         this.config = config;
-        this.executor = Executors.newSingleThreadExecutor(r -> {
+        this.executor = Executors.newFixedThreadPool(2, r -> {
             Thread t = new Thread(r, "cobblesyncbridge-http");
             t.setDaemon(true);
             return t;
@@ -89,18 +89,20 @@ public final class BackendClient {
     }
 
     private CompletableFuture<String> post(String path, Object payload) {
-        RequestSlot slot = acquireRequestSlot(path);
-        if (!slot.allowed()) {
-            return CompletableFuture.failedFuture(new IllegalStateException(slot.reason()));
+        long remainingBackoffMillis = remainingBackoffMillis();
+        if (remainingBackoffMillis > 0) {
+            if (config.verboseLogging()) {
+                CobbleSyncBridgeMod.LOGGER.info(
+                        "[CobbleSyncBridge] Skipping POST {} while backend is in backoff for {}s",
+                        path,
+                        Math.max(1, remainingBackoffMillis / 1000)
+                );
+            }
+            return CompletableFuture.failedFuture(new IllegalStateException("Backend is in temporary backoff"));
         }
 
         return CompletableFuture.supplyAsync(() -> {
             try {
-                long remainingBackoffMillis = remainingBackoffMillis();
-                if (remainingBackoffMillis > 0) {
-                    throw new BackendBackoffException("Backend is in temporary backoff");
-                }
-
                 String body = GSON.toJson(payload);
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(endpoint(path))
@@ -123,8 +125,6 @@ public final class BackendClient {
                 return response.body();
             } catch (BackendResponseException e) {
                 CobbleSyncBridgeMod.LOGGER.warn("[CobbleSyncBridge] POST {} failed: {}", path, e.getMessage());
-                throw e;
-            } catch (BackendBackoffException e) {
                 throw e;
             } catch (HttpTimeoutException e) {
                 CobbleSyncBridgeMod.LOGGER.warn(
@@ -153,42 +153,8 @@ public final class BackendClient {
                 CobbleSyncBridgeMod.LOGGER.error("[CobbleSyncBridge] POST {} failed", path, e);
                 recordFailure(path);
                 throw new RuntimeException(e);
-            } finally {
-                releaseRequestSlot();
             }
         }, executor);
-    }
-
-    private synchronized RequestSlot acquireRequestSlot(String path) {
-        long remainingBackoffMillis = remainingBackoffMillis();
-        if (remainingBackoffMillis > 0) {
-            if (config.verboseLogging()) {
-                CobbleSyncBridgeMod.LOGGER.info(
-                        "[CobbleSyncBridge] Skipping POST {} while backend is in backoff for {}s",
-                        path,
-                        Math.max(1, remainingBackoffMillis / 1000)
-                );
-            }
-            return RequestSlot.rejected("Backend is in temporary backoff");
-        }
-
-        if (queuedRequests >= MAX_QUEUED_REQUESTS) {
-            if (config.verboseLogging()) {
-                CobbleSyncBridgeMod.LOGGER.info(
-                        "[CobbleSyncBridge] Dropping POST {} because HTTP queue is full ({})",
-                        path,
-                        MAX_QUEUED_REQUESTS
-                );
-            }
-            return RequestSlot.rejected("Backend HTTP queue is full");
-        }
-
-        queuedRequests++;
-        return RequestSlot.allow();
-    }
-
-    private synchronized void releaseRequestSlot() {
-        queuedRequests = Math.max(0, queuedRequests - 1);
     }
 
     private synchronized long remainingBackoffMillis() {
@@ -197,17 +163,25 @@ public final class BackendClient {
     }
 
     private synchronized void recordSuccess() {
+        consecutiveFailures = 0;
         backoffUntilMillis = 0;
     }
 
     private synchronized void recordFailure(String path) {
+        consecutiveFailures++;
+        if (consecutiveFailures < FAILURES_BEFORE_BACKOFF) {
+            return;
+        }
+
         backoffUntilMillis = System.currentTimeMillis() + BACKOFF_DURATION.toMillis();
         CobbleSyncBridgeMod.LOGGER.warn(
-                "[CobbleSyncBridge] Backend unreachable; pausing HTTP sync for {}s. Last failed endpoint={}, backendBaseUrl={}",
+                "[CobbleSyncBridge] Backend unreachable after {} failed requests; pausing HTTP sync for {}s. Last failed endpoint={}, backendBaseUrl={}",
+                consecutiveFailures,
                 BACKOFF_DURATION.toSeconds(),
                 path,
                 config.backendBaseUrl()
         );
+        consecutiveFailures = 0;
     }
 
     private URI endpoint(String path) {
@@ -220,22 +194,6 @@ public final class BackendClient {
     private static final class BackendResponseException extends RuntimeException {
         private BackendResponseException(String message) {
             super(message);
-        }
-    }
-
-    private static final class BackendBackoffException extends RuntimeException {
-        private BackendBackoffException(String message) {
-            super(message);
-        }
-    }
-
-    private record RequestSlot(boolean allowed, String reason) {
-        private static RequestSlot allow() {
-            return new RequestSlot(true, "");
-        }
-
-        private static RequestSlot rejected(String reason) {
-            return new RequestSlot(false, reason);
         }
     }
 }
